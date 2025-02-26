@@ -1,8 +1,8 @@
-tensorflow
-keras
 numpy
 scipy
 streamlit
 matplotlib
 scipy
 pandas
+bottleneck
+onnxruntime

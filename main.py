@@ -1,69 +1,91 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import keras
 import numpy as np
 from scipy import signal as scipy_signal
+from scipy import ndimage
+import bottleneck as bn
+import onnxruntime as ort
 
 CLASS_LABELS = [
     "Come", "Stop", "Hurry up", "Crouch", "Rally Point"
 ]
-MODEL = keras.saving.load_model("best_emg_model.keras")
-FS = 2000
 
-def extract_envelope(signal):
-    analytic_signal = scipy_signal.hilbert(signal)
-    envelope = np.abs(analytic_signal)
-    return envelope
+MODEL = ort.InferenceSession("model.onnx")
 
-def preprocess(signal):
-    time_window = FS * 10
+INTERVALS = [(33, 44)]
 
-    signal = signal[:time_window]
-    downsampled = signal[::2]
-    smoothed = np.zeros_like(downsampled)
+def preprocess(df):
+    df["time"] = pd.to_datetime(df.index.astype('float32') / 2000, unit='s')
+    df.set_index("time", inplace=True)
 
-    for channel in range(3):
-        smoothed[:, channel] = scipy_signal.savgol_filter(
-            downsampled[:, channel],
-            window_length=401,
-            polyorder=4
+    signals = []
+
+    for i, (s, e) in enumerate(INTERVALS):
+        s = pd.to_datetime(s, unit='s')
+        e = pd.to_datetime(e, unit='s')
+        segment = df[s:e]
+        segment_values = segment.values
+
+        segment = scipy_signal.resample(segment_values, 10000, axis=0)
+        smoothed = scipy_signal.savgol_filter(
+            segment,
+            window_length=501,
+            polyorder=2,
+            axis=0
         )
-    
-    envelopes = np.zeros_like(smoothed)
-    for channel in range(3):
-        envelopes[:, channel] = extract_envelope(smoothed[:, channel])
 
-    combined_features = np.concatenate([smoothed, envelopes], axis=1)
-    target_length = 11000
-    if combined_features.shape[0] < target_length:
-        combined_features = np.pad(
-            combined_features,
-            ((0, target_length - combined_features.shape[0]), (0, 0)),
-            mode='constant'
-        )
-    
-    return np.expand_dims(combined_features, 0)
+        stds = np.std(smoothed, axis=0, keepdims=True)
+        norm_smoothed = (smoothed / stds)
 
-def model(raw_signal):
-    return MODEL.predict(raw_signal).squeeze() * 100
+        dilated = np.vstack([
+            ndimage.grey_dilation(norm_smoothed[:, 0], size=20),
+            ndimage.grey_dilation(norm_smoothed[:, 1], size=20),
+            ndimage.grey_dilation(norm_smoothed[:, 2], size=20)
+        ])
+
+        eroded = np.vstack([
+            ndimage.grey_erosion(norm_smoothed[:, 0], size=20),
+            ndimage.grey_erosion(norm_smoothed[:, 1], size=20),
+            ndimage.grey_erosion(norm_smoothed[:, 2], size=20)
+        ])
+
+        smooth_dilated = bn.move_mean(dilated, 10, axis=1)
+        smooth_eroded = bn.move_mean(eroded, 10, axis=1)
+
+        features = np.vstack([
+            segment.T,
+            norm_smoothed.T,
+            smooth_dilated,
+            smooth_eroded
+        ])
+
+        features = np.nan_to_num(features)
+        signals.append(features)
+
+    return signals
 
 st.title("Hand Gesture Classification using EMG")
 
 uploaded_file = st.file_uploader("Upload a signal file (CSV or TXT) @ 2000Hz", type=["csv", "txt"])
 
 if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file, header=None, skiprows=3)
-    raw_signal = df.iloc[:, :3].values
-    processed_signal = preprocess(raw_signal)
+    df = pd.read_csv(uploaded_file)
+    print(len(df))
+    processed_signal = np.asarray(preprocess(df))
+    print(processed_signal.shape)
 
-    pred_class_probs = model(processed_signal)
+
+    pred_class_probs = MODEL.run(None, {"input": np.swapaxes(processed_signal, 1, 2).astype('float32')})[0][0]
+    pred_class_probs = np.exp(pred_class_probs)
+    pred_class_probs /= np.sum(pred_class_probs)
 
     S = ''
     for class_, prob in zip(CLASS_LABELS, pred_class_probs):
-        S += f"{class_}: {prob:.2f}%\n"
+        S += f"{class_}: {float(prob) * 100:.4f}%\n"
 
     st.success(S)
     st.success(f"Predicted Action: {CLASS_LABELS[pred_class_probs.argmax()]}")
 
-    st.line_chart(np.squeeze(processed_signal))
+    short_signal = scipy_signal.resample(processed_signal, 2000, axis=-1)
+    st.line_chart(np.squeeze(short_signal.T))
