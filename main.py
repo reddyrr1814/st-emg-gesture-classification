@@ -13,7 +13,7 @@ CLASS_LABELS = [
 
 MODEL = ort.InferenceSession("model.onnx")
 
-INTERVALS = [(33, 44)]
+INTERVALS = [(0, 11)]
 
 def preprocess(df):
     df["time"] = pd.to_datetime(df.index.astype('float32') / 2000, unit='s')
@@ -68,10 +68,12 @@ def preprocess(df):
 st.title("Hand Gesture Classification using EMG")
 
 uploaded_file = st.file_uploader("Upload a signal file (CSV or TXT) @ 2000Hz", type=["csv", "txt"])
+value = st.number_input("Start time duration", min_value=0, step=1)
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
-    print(len(df))
+    INTERVALS = [(value, value + 11)]
+
     processed_signal = np.asarray(preprocess(df))
     print(processed_signal.shape)
 
